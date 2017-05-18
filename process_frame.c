@@ -13,6 +13,8 @@
 #include <stdlib.h>
 
 #define IMG_SIZE NUM_COLORS*OSC_CAM_MAX_IMAGE_WIDTH*OSC_CAM_MAX_IMAGE_HEIGHT
+#define  NumFgrCol	2 //blue and red stones
+#define YCBCR 1			//1 = detect in YCbCr colors
 
 const int nc = OSC_CAM_MAX_IMAGE_WIDTH;
 const int nr = OSC_CAM_MAX_IMAGE_HEIGHT;
@@ -30,117 +32,38 @@ const int SizeCross = 10;
 
 struct OSC_VIS_REGIONS ImgRegions;/* these contain the foreground objects */
 
-unsigned char OtsuThreshold(int InIndex);
-void Binarize(unsigned char threshold);
 void Erode_3x3(int InIndex, int OutIndex);
 void Dilate_3x3(int InIndex, int OutIndex);
 void DetectRegions();
 void DrawBoundingBoxes();
+void ChangeDetectionRGB();
+void ChangeDetectionYCbCr();
+void DetectObjects();
 
 
 void ResetProcess()
 {
 	//called when "reset" button is pressed
-	if(ManualThreshold == false)
-		ManualThreshold = true;
-	else
-		ManualThreshold = false;
+	ManualThreshold = true;
 }
 
 
 void ProcessFrame() {
 	//initialize counters
 	if(data.ipc.state.nStepCounter == 1) {
-		ManualThreshold = false;
+		ManualThreshold = true;
 	} else {
-		unsigned char Threshold = OtsuThreshold(SENSORIMG);
-
-		Binarize(Threshold);
 
 		Erode_3x3(THRESHOLD, INDEX0);
 		Dilate_3x3(INDEX0, THRESHOLD);
 
-		DetectRegions();
+		if(YCBCR == 1)
+			ChangeDetectionYCbCr();
+		else
+			ChangeDetectionRGB();
 
 		DrawBoundingBoxes();
-
-		if(ManualThreshold) {
-			char Text[] = "manual threshold";
-			DrawString(20, 20, strlen(Text), SMALL, CYAN, Text);
-		} else {
-			char Text[] = " Otsu's threshold";
-			DrawString(20, 20, strlen(Text), SMALL, CYAN, Text);
-		}
 	}
-}
-
-
-
-void Binarize(unsigned char threshold) {
-	int r, c;
-	//set result buffer to zero
-	memset(data.u8TempImage[THRESHOLD], 0, IMG_SIZE);
-
-	//loop over the rows
-	for(r = Border*nc; r < (nr-Border)*nc; r += nc) {
-		//loop over the columns
-		for(c = Border; c < (nc-Border); c++) {
-			//manual threshold?
-			if(ManualThreshold) {
-				if(data.u8TempImage[SENSORIMG][r+c] < data.ipc.state.nThreshold) {
-					data.u8TempImage[THRESHOLD][r+c] = 255;
-				}
-			} else {
-				if(data.u8TempImage[SENSORIMG][r+c] < threshold) {
-					data.u8TempImage[THRESHOLD][r+c] = 255;
-				}
-			}
-		}
-	}
-}
-
-
-unsigned char OtsuThreshold(int InIndex) {
-	//first part: extract gray value histogram
-	unsigned int i1, best_i, K;
-	float Hist[256];
-	unsigned char* p = data.u8TempImage[InIndex];
-	float best;
-	memset(Hist, 0, sizeof(Hist));
-
-	for(i1 = 0; i1 < nr*nc; i1++) {
-		Hist[p[i1]] += 1;
-	}
-	//second part: determine threshold according to Otsu's method
-	best = 0;
-	best_i = 0;
-	for(K = 0; K < 255; K++)	{
-		//the class accumulators
-		float w0 = 0, mu0 = 0, w1 = 0, mu1 = 0;
-		float bestloc;
-
-		//class 0 and 1 probabilities and averages
-		for(i1 = 0; i1 <= K; i1++)	{
-			w0 += Hist[i1];
-			mu0 += (Hist[i1]*i1);
-		}
-		for(; i1 <= 255; i1++) {
-			w1 += Hist[i1];
-			mu1 += (Hist[i1]*i1);
-		}
-		//do normalization of average values
-		mu0 /= w0;
-		mu1 /= w1;
-
-		bestloc = w0*w1*(mu0-mu1)*(mu0-mu1);
-		if(bestloc > best) {
-			best = bestloc;
-			best_i = K;
-			//OscLog(INFO, "%d %d %d %d %d\n", i1, w0, w1, mu0, mu1);
-		}
-	}
-	//OscLog(INFO, "%d %f\n", best_i, best);
-	return (unsigned char) best_i;
 }
 
 void Erode_3x3(int InIndex, int OutIndex)
@@ -209,4 +132,133 @@ void DrawBoundingBoxes() {
 	}
 }
 
+void ChangeDetectionRGB() {
+	//const int NumFgrCol = 2;	//blue, red backwards BGR
+	uint8 FrgCol[NumFgrCol][3] = {{110, 75, 61}, {34, 44, 162}};
+	int r, c, frg, p;
 
+	memset(data.u8TempImage[INDEX0], 0, IMG_SIZE);
+	memset(data.u8TempImage[BACKGROUND], 0, IMG_SIZE);
+
+
+	//loop over the rows
+	for(r = 0; r < nr*nc; r += nc) {
+		//loop over the columns
+		for(c = 0; c < nc; c++) {
+			//loop over the different Frg colors and find smallest difference
+			int MinDif = 1 << 30;
+			int MinInd = 0;
+			for(frg = 0; frg < NumFgrCol; frg++) {
+				int Dif = 0;
+				//loop over the color planes (r, g, b) and sum up the difference
+				for(p = 0; p < NUM_COLORS; p++) {
+					Dif += abs((int) data.u8TempImage[SENSORIMG][(r+c)*NUM_COLORS+p]-
+					(int) FrgCol[frg][p]);
+				}
+				if(Dif < MinDif) {
+					MinDif = Dif;
+					MinInd = frg;
+				}
+			}
+			//if the difference is smaller than threshold value
+			if(MinDif < data.ipc.state.nThreshold) {
+				//set pixel value to 255 in THRESHOLD image for further processing
+				//(we use only the first third of the image buffer)
+				data.u8TempImage[INDEX1][(r+c)] = 255;
+				//set pixel value to Frg color in BACKGROUND image for visualization
+				for(p = 0; p < NUM_COLORS; p++) {
+					data.u8TempImage[BACKGROUND][(r+c)*NUM_COLORS+p] = FrgCol[MinInd][p];
+				}
+			}
+		}
+	}
+}
+
+void ChangeDetectionYCbCr() {
+	//colors blue and red in YCbCr (here CrCbY, backward order)
+	uint8 FrgCol[NumFgrCol][3] = {{95, 155, 95}, {90, 110, 180}};
+	int r, c, frg, p;
+
+	memset(data.u8TempImage[INDEX0], 0, IMG_SIZE);
+	memset(data.u8TempImage[THRESHOLD], 0, IMG_SIZE);
+
+	for(r = 0; r < nr*nc; r += nc) {
+		//loop over the columns
+		for(c = 0; c < nc; c++) {
+			//get rgb values (order is actually bgr!)
+			float B_ = data.u8TempImage[SENSORIMG][(r+c)*NUM_COLORS+0];
+			float G_ = data.u8TempImage[SENSORIMG][(r+c)*NUM_COLORS+1];
+			float R_ = data.u8TempImage[SENSORIMG][(r+c)*NUM_COLORS+2];
+			uint8 Y_ = (uint8) ( 0 + 0.299*R_ + 0.587*G_ + 0.114*B_);
+			uint8 Cb_ = (uint8) (128 - 0.169*R_ - 0.331*G_ + 0.500*B_);
+			uint8 Cr_ = (uint8) (128 + 0.500*R_ - 0.419*G_ - 0.081*B_);
+			//we write result to THRESHOLD
+			data.u8TempImage[THRESHOLD][(r+c)*NUM_COLORS+0] = Y_;
+			data.u8TempImage[THRESHOLD][(r+c)*NUM_COLORS+1] = Cb_;
+			data.u8TempImage[THRESHOLD][(r+c)*NUM_COLORS+2] = Cr_;
+		}
+	}
+
+	//loop over the rows
+	for(r = 0; r < nr*nc; r += nc) {
+		//loop over the columns
+		for(c = 0; c < nc; c++) {
+			//loop over the different Frg colors and find smallest difference
+			int MinDif = 1 << 30;
+			int MinInd = 0;
+			for(frg = 0; frg < NumFgrCol; frg++) {
+				int Dif = 0;
+				//loop over the color planes (r, g, b) and sum up the difference
+				for(p = 1; p < NUM_COLORS; p++) {
+					Dif += abs((int) data.u8TempImage[THRESHOLD][(r+c)*NUM_COLORS+p]-
+					(int) FrgCol[frg][p]);
+				}
+				if(Dif < MinDif) {
+					MinDif = Dif;
+					MinInd = frg;
+				}
+			}
+			//if the difference is smaller than threshold value
+			if(MinDif < data.ipc.state.nThreshold) {
+				//set pixel value to 255 in THRESHOLD image for further processing
+				//(we use only the first third of the image buffer)
+				data.u8TempImage[INDEX1][(r+c)] = 255;
+				//set pixel value to Frg color in BACKGROUND image for visualization
+				for(p = 1; p < NUM_COLORS; p++) {
+					data.u8TempImage[BACKGROUND][(r+c)*NUM_COLORS+p] = FrgCol[MinInd][p];
+				}
+			}
+		}
+	}
+}
+
+void DetectObjects(){
+	int c,o,p;
+	uint8 hist[3];
+	int color;
+
+
+	//loop over objects
+	for(o = 0; o < ImgRegions.noOfObjects; o++) {
+		//get pointer to root run of current object
+		struct OSC_VIS_REGIONS_RUN* currentRun = ImgRegions.objects[o].root;
+		//loop over runs of current object
+		do {
+			//loop over pixel of current run
+			for(c = currentRun->startColumn; c <= currentRun->endColumn; c++) {
+				int r = currentRun->row;
+				//loop over color planes of pixel
+				for(p = 1; p < NUM_COLORS; p++) {
+					//addressing individual pixel at row r, column c and color p
+					hist[p] += data.u8TempImage[SENSORIMG][(r*nc+c)*NUM_COLORS+p];
+					//..
+				}
+				if (hist[1] <= hist[2])
+					color = 0; //blue
+				else
+					color = 1; //red
+			}
+			currentRun = currentRun->next; //get next run of current object
+		} while(currentRun != NULL); //end of current object
+	}
+}
