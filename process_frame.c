@@ -14,7 +14,14 @@
 
 #define IMG_SIZE NUM_COLORS*OSC_CAM_MAX_IMAGE_WIDTH*OSC_CAM_MAX_IMAGE_HEIGHT
 #define  NumFgrCol	2 //blue and red stones
-#define YCBCR 1			//1 = detect in YCbCr colors
+#define BLUE	0
+#define RED		1
+
+//------------------------------------------------------------------------------------------
+#define YCBCR 	0	//1 = detect in YCbCr colors, 0 detect in RGB colros
+//------------------------------------------------------------------------------------------
+
+int regionColor[20];
 
 const int nc = OSC_CAM_MAX_IMAGE_WIDTH;
 const int nr = OSC_CAM_MAX_IMAGE_HEIGHT;
@@ -38,7 +45,6 @@ void DetectRegions();
 void DrawBoundingBoxes();
 void ChangeDetectionRGB();
 void ChangeDetectionYCbCr();
-void DetectObjects();
 
 
 void ResetProcess()
@@ -53,10 +59,6 @@ void ProcessFrame() {
 	if(data.ipc.state.nStepCounter == 1) {
 		ManualThreshold = true;
 	} else {
-
-		Erode_3x3(THRESHOLD, INDEX0);
-		Dilate_3x3(INDEX0, THRESHOLD);
-
 		if(YCBCR == 1)
 			ChangeDetectionYCbCr();
 		else
@@ -118,15 +120,20 @@ void DetectRegions() {
 
 void DrawBoundingBoxes() {
 	uint16 o;
+	int color;
 	for(o = 0; o < ImgRegions.noOfObjects; o++) {
 		if(ImgRegions.objects[o].area > MinArea) {
+			if(regionColor[o] == BLUE)
+				color = 4;
+			else
+				color = 2;
 			DrawBoundingBox(ImgRegions.objects[o].bboxLeft, ImgRegions.objects[o].bboxTop,
-							ImgRegions.objects[o].bboxRight, ImgRegions.objects[o].bboxBottom, false, GREEN);
+							ImgRegions.objects[o].bboxRight, ImgRegions.objects[o].bboxBottom, false, color);
 
 			DrawLine(ImgRegions.objects[o].centroidX-SizeCross, ImgRegions.objects[o].centroidY,
-					 ImgRegions.objects[o].centroidX+SizeCross, ImgRegions.objects[o].centroidY, RED);
+					 ImgRegions.objects[o].centroidX+SizeCross, ImgRegions.objects[o].centroidY, color);
 			DrawLine(ImgRegions.objects[o].centroidX, ImgRegions.objects[o].centroidY-SizeCross,
-								 ImgRegions.objects[o].centroidX, ImgRegions.objects[o].centroidY+SizeCross, RED);
+								 ImgRegions.objects[o].centroidX, ImgRegions.objects[o].centroidY+SizeCross, color);
 
 		}
 	}
@@ -135,7 +142,7 @@ void DrawBoundingBoxes() {
 void ChangeDetectionRGB() {
 	//const int NumFgrCol = 2;	//blue, red backwards BGR
 	uint8 FrgCol[NumFgrCol][3] = {{110, 75, 61}, {34, 44, 162}};
-	int r, c, frg, p;
+	int r, c, frg, p, o;
 
 	memset(data.u8TempImage[INDEX0], 0, IMG_SIZE);
 	memset(data.u8TempImage[BACKGROUND], 0, IMG_SIZE);
@@ -172,15 +179,52 @@ void ChangeDetectionRGB() {
 			}
 		}
 	}
+	Erode_3x3(INDEX1, INDEX0);
+	Dilate_3x3(INDEX0, THRESHOLD);
+	DetectRegions();
+	//loop over objects
+	for(o = 0; o < ImgRegions.noOfObjects; o++) {
+		if(ImgRegions.objects[o].area > MinArea){
+			int hist[2]; //make histogramm for color Blue and Red
+			hist[BLUE] = 0;
+			hist[RED] = 0;
+			//get pointer to root run of current object
+			struct OSC_VIS_REGIONS_RUN* currentRun = ImgRegions.objects[o].root;
+			//loop over runs of current object
+			do {
+				//loop over pixel of current run
+				for(c = currentRun->startColumn; c <= currentRun->endColumn; c++) {
+					int r = currentRun->row;
+					//loop over color planes of pixel
+					for(p = 1; p < NUM_COLORS; p++) {
+						//addressing individual pixel at row r, column c and color p
+						if(data.u8TempImage[BACKGROUND][(r*nc+c)*NUM_COLORS+p] == FrgCol[0][p]){
+							hist[BLUE]++;
+						}
+						else
+							hist[RED]++;
+					}
+				}
+				currentRun = currentRun->next; //get next run of current object
+			} while(currentRun != NULL); //end of current object
+			if(hist[BLUE] > hist[RED]){
+				regionColor[o] = BLUE;
+			}
+			else{
+				regionColor[o] = RED;
+			}
+		}
+	}
 }
 
 void ChangeDetectionYCbCr() {
 	//colors blue and red in YCbCr (here CrCbY, backward order)
 	uint8 FrgCol[NumFgrCol][3] = {{95, 155, 95}, {90, 110, 180}};
-	int r, c, frg, p;
+	int r, c, frg, p, o;
 
-	memset(data.u8TempImage[INDEX0], 0, IMG_SIZE);
+	memset(data.u8TempImage[INDEX1], 0, IMG_SIZE);
 	memset(data.u8TempImage[THRESHOLD], 0, IMG_SIZE);
+	memset(data.u8TempImage[BACKGROUND], 0, IMG_SIZE);
 
 	for(r = 0; r < nr*nc; r += nc) {
 		//loop over the columns
@@ -230,35 +274,40 @@ void ChangeDetectionYCbCr() {
 			}
 		}
 	}
-}
-
-void DetectObjects(){
-	int c,o,p;
-	uint8 hist[3];
-	int color;
-
-
+	Erode_3x3(INDEX1, INDEX0);
+	Dilate_3x3(INDEX0, THRESHOLD);
+	DetectRegions();
 	//loop over objects
 	for(o = 0; o < ImgRegions.noOfObjects; o++) {
-		//get pointer to root run of current object
-		struct OSC_VIS_REGIONS_RUN* currentRun = ImgRegions.objects[o].root;
-		//loop over runs of current object
-		do {
-			//loop over pixel of current run
-			for(c = currentRun->startColumn; c <= currentRun->endColumn; c++) {
-				int r = currentRun->row;
-				//loop over color planes of pixel
-				for(p = 1; p < NUM_COLORS; p++) {
-					//addressing individual pixel at row r, column c and color p
-					hist[p] += data.u8TempImage[SENSORIMG][(r*nc+c)*NUM_COLORS+p];
-					//..
+		if(ImgRegions.objects[o].area > MinArea){
+			int hist[2]; //make histogramm for color Blue and Red
+			hist[BLUE] = 0;
+			hist[RED] = 0;
+			//get pointer to root run of current object
+			struct OSC_VIS_REGIONS_RUN* currentRun = ImgRegions.objects[o].root;
+			//loop over runs of current object
+			do {
+				//loop over pixel of current run
+				for(c = currentRun->startColumn; c <= currentRun->endColumn; c++) {
+					int r = currentRun->row;
+					//loop over color planes of pixel
+					for(p = 1; p < NUM_COLORS; p++) {
+						//addressing individual pixel at row r, column c and color p
+						if(data.u8TempImage[BACKGROUND][(r*nc+c)*NUM_COLORS+p] == FrgCol[0][p]){
+							hist[BLUE]++;
+						}
+						else
+							hist[RED]++;
+					}
 				}
-				if (hist[1] <= hist[2])
-					color = 0; //blue
-				else
-					color = 1; //red
+				currentRun = currentRun->next; //get next run of current object
+			} while(currentRun != NULL); //end of current object
+			if(hist[BLUE] > hist[RED]){
+				regionColor[o] = BLUE;
 			}
-			currentRun = currentRun->next; //get next run of current object
-		} while(currentRun != NULL); //end of current object
+			else{
+				regionColor[o] = RED;
+			}
+		}
 	}
 }
